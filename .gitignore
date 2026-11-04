@@ -1,0 +1,7 @@
+.vs/
+.deps/
+build/
+src/build/
+src/build-*/
+__pycache__/
+*.pyc

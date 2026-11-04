@@ -1,0 +1,54 @@
+name: Build and restore tests
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libarchive-dev libssl-dev cmake g++
+      - name: macOS dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew install libarchive openssl@3
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix libarchive):$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+      - name: Configure
+        run: cmake -S src -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --parallel 2
+      - name: Portable regression tests
+        run: python3 src/tests/integration.py build/cbackup
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-libarchive
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-python
+      - name: Configure
+        run: cmake -G Ninja -S src -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --parallel 2
+      - name: Portable regression tests
+        run: python src/tests/integration.py build/cbackup.exe
