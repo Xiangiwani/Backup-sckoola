@@ -112,6 +112,21 @@ if ($Profile -eq 'Advanced') {
     if (-not $answer) { $answer = '1' }; Invoke-Checked { & $binary config $Job set keep_chains $answer }
     $answer = Read-Host 'Log rotation size in MiB (previous log is kept as .1) [5]'
     if (-not $answer) { $answer = '5' }; Invoke-Checked { & $binary config $Job set log_max_mb $answer }
+    $healthChoices = @(
+        @{ Key='notifications'; Default='true'; Prompt='Record and report failures/stale backups? true/false' },
+        @{ Key='desktop_notifications'; Default='false'; Prompt='Also display desktop notifications? true/false (requires a user session)' },
+        @{ Key='stale_hours'; Default='24'; Prompt='Hours without a successful run before warning (0 = off)' },
+        @{ Key='notify_repeat_hours'; Default='24'; Prompt='Repeat the same alert after N hours' },
+        @{ Key='test_restore_days'; Default='7'; Prompt='Test restore interval in days (0 = off; tested after successful runs)' },
+        @{ Key='test_restore_max_mb'; Default='64'; Prompt='Maximum sample file size for a test restore in MiB' },
+        @{ Key='storage_quota_mb'; Default='0'; Prompt='Local backup storage budget in MiB (0 = unlimited; chains stay protected)' },
+        @{ Key='offline_reminder_days'; Default='14'; Prompt='Offline-copy reminder interval in days (0 = off)' }
+    )
+    foreach ($choice in $healthChoices) {
+        $answer = Read-Host ($choice.Prompt + ' [' + $choice.Default + ']')
+        if (-not $answer) { $answer = $choice.Default }
+        Invoke-Checked { & $binary config $Job set $choice.Key $answer }
+    }
     $answer = Read-Host 'Additional USB/external destination (must be mounted; Enter to skip)'
     if ($answer) { Invoke-Checked { & $binary config $Job set usb $answer } }
     $answer = Read-Host 'Additional rclone cloud destination (remote:path; Enter to skip)'

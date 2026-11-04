@@ -36,7 +36,7 @@ using std::string;
 using std::vector;
 using std::map;
 
-static const char *VERSION = "1.2";
+static const char *VERSION = "1.3";
 
 static void fail(const string &s) { throw std::runtime_error(s); }
 static void require(bool b, const string &s) { if (!b) fail(s); }
@@ -284,6 +284,9 @@ struct Job {
     string encryption="none", password_env="CBACKUP_PASSWORD", profile="all";
     bool exclude_dependencies=true, autostart=true, watch=false;
     int compression_level=0, full_every=12, keep_chains=1, keep_days=90, watch_seconds=30, log_max_mb=5;
+    bool notifications=true, desktop_notifications=false;
+    int stale_hours=24, notify_repeat_hours=24, test_restore_days=7, test_restore_max_mb=64, offline_reminder_days=14;
+    int storage_quota_mb=0;
     vector<string> sources, exts, includes, excludes;
 };
 static void save_job(const Job &j) {
@@ -297,6 +300,10 @@ static void save_job(const Job &j) {
     put("exclude_dependencies",j.exclude_dependencies?"true":"false");
     put("autostart",j.autostart?"true":"false"); put("watch",j.watch?"true":"false");
     o<<"watch_seconds="<<j.watch_seconds<<"\nlog_max_mb="<<j.log_max_mb<<"\n";
+    put("notifications",j.notifications?"true":"false");put("desktop_notifications",j.desktop_notifications?"true":"false");
+    o<<"stale_hours="<<j.stale_hours<<"\nnotify_repeat_hours="<<j.notify_repeat_hours
+     <<"\ntest_restore_days="<<j.test_restore_days<<"\ntest_restore_max_mb="<<j.test_restore_max_mb
+     <<"\noffline_reminder_days="<<j.offline_reminder_days<<"\nstorage_quota_mb="<<j.storage_quota_mb<<"\n";
     for(auto &s:j.sources)put("source",s);
     for(auto &s:j.exts)put("ext",s);
     for(auto &s:j.includes)put("include",s);
@@ -329,6 +336,14 @@ static Job load_job(const string &name) {
         }
         else if(k=="watch_seconds")j.watch_seconds=positive_int(v,5,86400);
         else if(k=="log_max_mb")j.log_max_mb=positive_int(v,1,1024);
+        else if(k=="notifications") {require(v=="true"||v=="false","Use true or false");j.notifications=v=="true";}
+        else if(k=="desktop_notifications") {require(v=="true"||v=="false","Use true or false");j.desktop_notifications=v=="true";}
+        else if(k=="stale_hours")j.stale_hours=positive_int(v,0,87600);
+        else if(k=="notify_repeat_hours")j.notify_repeat_hours=positive_int(v,1,87600);
+        else if(k=="test_restore_days")j.test_restore_days=positive_int(v,0,3650);
+        else if(k=="test_restore_max_mb")j.test_restore_max_mb=positive_int(v,1,1048576);
+        else if(k=="offline_reminder_days")j.offline_reminder_days=positive_int(v,0,3650);
+        else if(k=="storage_quota_mb")j.storage_quota_mb=positive_int(v,0,2147483647);
         else if(k=="source")j.sources.push_back(v);
         else if(k=="ext")j.exts.push_back(v);
         else if(k=="include")j.includes.push_back(v);
@@ -413,6 +428,10 @@ static void show_job(const Job &j) {
     std::cout<<"Encryption: "<<j.encryption<<" (password_env: "<<j.password_env<<")\n"
              <<"Profile: "<<j.profile<<"\nExclude dependencies: "<<j.exclude_dependencies
              <<"\nAutostart: "<<j.autostart<<"\nWatch: "<<j.watch<<" ("<<j.watch_seconds<<" seconds)\n";
+    std::cout<<"Desktop notifications: "<<j.desktop_notifications<<"\nNotifications: "<<j.notifications<<"; stale_hours: "<<j.stale_hours<<"; notify_repeat_hours: "<<j.notify_repeat_hours
+             <<"\nTest restore every: "<<j.test_restore_days<<" days; sample limit: "<<j.test_restore_max_mb<<" MiB"
+             <<"\nStorage quota: "<<j.storage_quota_mb<<" MiB (0 = unlimited)"
+             <<"\nOffline reminder every: "<<j.offline_reminder_days<<" days (0 = off)\n";
 }
 
 // ---------------------------------------------------------------- manifests
@@ -749,8 +768,51 @@ static void prune(const Job &j) {
 }
 
 // ---------------------------------------------------------------- back-up maken
+static uintmax_t backup_storage_bytes(const Job &j) {
+    uintmax_t bytes=0;
+    for(const auto &m:get_manifests(j)) {
+        bytes+=fs::file_size(job_dir(j)/m.archive);
+        bytes+=fs::file_size(job_dir(j)/("snap_"+m.id+".manifest"));
+    }
+    fs::path mirror=job_dir(j)/"mirror";
+    if(fs::exists(mirror))for(const auto &e:fs::recursive_directory_iterator(mirror))
+        if(!e.is_symlink()&&e.is_regular_file())bytes+=e.file_size();
+    return bytes;
+}
+static void quota_check(const Job &j,uintmax_t added=0,uintmax_t replaced=0) {
+    if(!j.storage_quota_mb)return;
+    uintmax_t used=backup_storage_bytes(j), quota=static_cast<uintmax_t>(j.storage_quota_mb)*1024*1024;
+    require(used>=replaced,"Invalid storage accounting");
+    require(added<=quota&&used-replaced<=quota-added,
+            "Storage quota exceeded: stored="+human_size(used)+", new="+human_size(added)+
+            ", budget="+human_size(quota)+". Required restore chains and retention were preserved; increase storage_quota_mb or adjust retention.");
+}
+static uintmax_t space_estimate(const FileMap &files,const vector<string> &keys) {
+    uintmax_t bytes=65536;
+    for(const auto &key:keys)bytes+=files.at(key).size+4096;
+    return bytes+bytes/50; // Conservative tar/codec overhead; exact quota checked after compression.
+}
+static void space_preflight(const Job &j,uintmax_t estimate,bool encrypted,bool dry) {
+    uintmax_t used=backup_storage_bytes(j);
+    std::cout<<"Storage: "<<human_size(used)<<" used; estimated new archive: "<<human_size(estimate)
+             <<"; quota: "<<(j.storage_quota_mb?human_size(static_cast<uintmax_t>(j.storage_quota_mb)*1024*1024):"unlimited")<<"\n";
+    if(dry)return;
+    auto available=fs::space(job_dir(j)).available;
+    require(estimate<=available/(encrypted?2:1),"Insufficient free space for estimated backup and temporary encryption files");
+    if(j.storage_quota_mb&&used+estimate>static_cast<uintmax_t>(j.storage_quota_mb)*1024*1024) {
+        // Preserve the existing rule: replicate before deleting any expired chains.
+        replicate(j); prune(j);
+    }
+}
 static void mirror_run(const Job &j) {
     FileMap files=scan(j);
+    vector<string> keys; uintmax_t new_bytes=0, old_bytes=0;
+    for(const auto &kv:files) {keys.push_back(kv.first);new_bytes+=kv.second.size;}
+    space_preflight(j,space_estimate(files,keys),false,false);
+    fs::path old_mirror=job_dir(j)/"mirror";
+    if(fs::exists(old_mirror))for(const auto &e:fs::recursive_directory_iterator(old_mirror))
+        if(!e.is_symlink()&&e.is_regular_file())old_bytes+=e.file_size();
+    quota_check(j,new_bytes,old_bytes);
     fs::path dest=job_dir(j)/"mirror", temp=job_dir(j)/("mirror.tmp."+std::to_string(getpid()));
     require(!fs::exists(temp),"Temporary mirror folder already exists");
     try {
@@ -793,7 +855,11 @@ static void make_backup(const Job &j, const string &override_mode, bool dryrun) 
     string desired=override_mode.empty()?j.mode:override_mode;
     if(desired=="mirror") {
         require(j.encryption=="none","Encrypted mirror is unsupported; select auto/full/incremental/differential instead");
-        if(dryrun) {std::cout<<"Mirror-dry-run: "<<scan(j).size()<<" selected files.\n";return;}
+        if(dryrun) {
+            auto files=scan(j);vector<string> keys;for(const auto &kv:files)keys.push_back(kv.first);
+            std::cout<<"Mirror-dry-run: "<<files.size()<<" selected files.\n";
+            space_preflight(j,space_estimate(files,keys),false,true);return;
+        }
         mirror_run(j);log_event(j,"mirror");return;
     }
     require(desired=="auto"||desired=="full"||desired=="incremental"||desired=="differential","Invalid backup type: "+desired);
@@ -825,6 +891,7 @@ static void make_backup(const Job &j, const string &override_mode, bool dryrun) 
              <<", gehasht: "<<stats.hashed<<", unchanged by metadata: "<<stats.reused
              <<", compression: "<<comp_label(j.compression,j.compression_level)<<"\n";
     if(files.empty())std::cout<<"WARNING: no files selected.\n";
+    space_preflight(j,space_estimate(files,changed),j.encryption!="none",dryrun);
     if(dryrun)return;
     bool unchanged=prev&&prev->files.size()==files.size();
     if(unchanged)for(const auto &kv:files) {
@@ -833,7 +900,7 @@ static void make_backup(const Job &j, const string &override_mode, bool dryrun) 
     }
     if(type!="full"&&unchanged){
         std::cout<<"No changes; no new snapshot needed. Missing copies will be updated.\n";
-        replicate(j);prune(j);log_event(j,"unchanged");return;
+        replicate(j);prune(j);quota_check(j);log_event(j,"unchanged");return;
     }
     Manifest m;
     m.id=new_id();m.type=type;m.base=type=="full"?m.id:full->id;
@@ -856,8 +923,9 @@ static void make_backup(const Job &j, const string &override_mode, bool dryrun) 
             cb_crypto::transform(temp,encrypted,j.password_env,true);
             fs::remove(temp); cb::replace_file(encrypted,temp);
         }
+        m.archive_hash=sha256_file(temp);
+        quota_check(j,fs::file_size(temp)+manifest_text(m).size());
         fs::rename(temp,archpath);
-        m.archive_hash=sha256_file(archpath);
         atomic_write(manpath,manifest_text(m));
     }catch(...) {std::error_code ec;fs::remove(temp,ec);fs::remove(archpath,ec);fs::remove(manpath,ec);throw;}
     std::cout<<"Snapshot saved locally: "<<fmt_local(id_time(m.id))<<" ("<<m.archive<<", "<<human_size(fs::file_size(archpath))<<")\n";
@@ -1325,6 +1393,7 @@ static void restore_cmd(const Job &j,const vector<string> &when,const string &to
 }
 
 // ---------------------------------------------------------------- commando's
+#include "maintenance.h"
 static void help() { cb_i18n::help(std::cout,VERSION); }
 static void add_sources(Job &j, const vector<string> &paths) {
     for(auto &raw:paths) {
@@ -1383,6 +1452,14 @@ static void config_cmd(const vector<string> &a) {
         else if(k=="profile") {require(v=="all"||v=="settings"||v=="installers","Use all, settings or installers");j.profile=v;}
         else if(k=="watch_seconds")j.watch_seconds=positive_int(v,5,86400);
         else if(k=="log_max_mb")j.log_max_mb=positive_int(v,1,1024);
+        else if(k=="notifications") {require(v=="true"||v=="false","Use true or false");j.notifications=v=="true";}
+        else if(k=="desktop_notifications") {require(v=="true"||v=="false","Use true or false");j.desktop_notifications=v=="true";}
+        else if(k=="stale_hours")j.stale_hours=positive_int(v,0,87600);
+        else if(k=="notify_repeat_hours")j.notify_repeat_hours=positive_int(v,1,87600);
+        else if(k=="test_restore_days")j.test_restore_days=positive_int(v,0,3650);
+        else if(k=="test_restore_max_mb")j.test_restore_max_mb=positive_int(v,1,1048576);
+        else if(k=="offline_reminder_days")j.offline_reminder_days=positive_int(v,0,3650);
+        else if(k=="storage_quota_mb")j.storage_quota_mb=positive_int(v,0,2147483647);
         else if(k=="autostart"||k=="watch"||k=="exclude_dependencies") {
             require(v=="true"||v=="false","Use true or false");
             if(k=="autostart")j.autostart=v=="true";
@@ -1436,6 +1513,7 @@ static void init_cmd(const vector<string> &a) {
     }
     add_sources(j,srcs);
     save_job(j);
+    {cb::ProcessLock lock(health_dir(j)/".lock",true);save_health(j,load_health(j));}
     std::cout<<"Job gemaakt: "<<name<<"\n"
              <<"  Backups:    "<<job_dir(j).string()<<"  (change with: cbackup config "<<name<<" set dest PATH)\n"
              <<"  Type:       incremental; every "<<j.full_every<<" backups a full backup automatically\n"
@@ -1503,8 +1581,10 @@ static void watch_cmd(Job j) {
     log_event(j,"watch-start");
     while(!watch_stop) {
         j=load_job(j.name); if(!j.watch)break;
+        bool attempted=false;
         try {
             JobLock lock(j,false);
+            attempted=true;
             auto all=get_manifests(j);
             const Manifest *prev=all.empty()?nullptr:&all.back();
             auto files=scan(j,prev);
@@ -1513,8 +1593,13 @@ static void watch_cmd(Job j) {
                 auto it=prev->files.find(kv.first);
                 if(it==prev->files.end()||it->second.hash!=kv.second.hash) {changed=true;break;}
             }
-            if(changed)make_backup(j,"",false);
-        } catch(const std::exception &e) { log_event(j,"watch-error",e.what()); }
+            bool heartbeat=false;
+            {cb::ProcessLock state_lock(health_dir(j)/".lock",true);heartbeat=time(nullptr)-load_health(j).last_success>=3600;}
+            if(changed||heartbeat) {attempted=true;make_backup(j,"",false);finish_run(j,j.mode=="mirror");}
+        } catch(const std::exception &e) {
+            if(attempted||string(e.what())!="Another operation is running for this job")record_run_failure(j,e.what());
+            try {log_event(j,"watch-error",e.what());}catch(...) {}
+        }
         // Poll metadata only; unchanged files reuse snapshot hashes. Debounce saves at watch_seconds.
         for(int elapsed=0;elapsed<j.watch_seconds&&!watch_stop;++elapsed)std::this_thread::sleep_for(std::chrono::seconds(1));
     }
@@ -1522,7 +1607,7 @@ static void watch_cmd(Job j) {
 }
 int main(int argc,char **argv) {
     cb::initialize(); // private files on Unix, UTF-8 and low process priority
-    string active_job;
+    string active_job;bool active_run=false;
     try {
         vector<string> a=cb::arguments(argc,argv);
         std::ifstream language_file(fs::path(home())/".config/cbackup/language"); string language;
@@ -1549,6 +1634,10 @@ int main(int argc,char **argv) {
         if(cmd=="init") { init_cmd(a); return 0; }
         if(cmd=="config"){config_cmd(a);return 0;}
         Job j=load_job(name);
+        if(cmd=="health") {require(argc==3,"Usage: health JOB");return health_check(j,true)?0:2;}
+        if(cmd=="alerts") {require(argc==3,"Usage: alerts JOB");show_alerts(j);return 0;}
+        if(cmd=="test-restore") {require(argc==3,"Usage: test-restore JOB");JobLock lock(j,true);test_restore(j);return 0;}
+        if(cmd=="offline-confirm") {require(argc==4,"Usage: offline-confirm JOB SNAPSHOT_ID");JobLock lock(j,true);offline_confirm(j,a[3]);return 0;}
         if(cmd=="ids") {require(argc==3,"Usage: ids JOB");for(const auto &m:get_manifests(j))std::cout<<m.id<<"\n";return 0;}
         if(cmd=="changes") {changes_cmd(j,vector<string>(a.begin()+3,a.end()));return 0;}
         if(cmd=="undo-list") {require(argc==3,"Usage: undo-list JOB");undo_list(j);return 0;}
@@ -1571,8 +1660,10 @@ int main(int argc,char **argv) {
                 }
                 else fail("Unknown option: "+a[i]);
             }
+            active_run=!dry;
             JobLock lock(j,false);
             make_backup(j,mode,dry);
+            if(!dry)finish_run(j,(mode.empty()?j.mode:mode)=="mirror");
             return 0;
         }
         auto rest=[&](){ return vector<string>(a.begin()+3,a.end()); };
@@ -1604,7 +1695,11 @@ int main(int argc,char **argv) {
         fail("Unknown command: "+cmd+" (see: cbackup help)");
     } catch(const std::exception &e) {
         std::cerr<<"ERROR: "<<cb_i18n::tr(e.what())<<"\n";
-        if(!active_job.empty()) {try {log_event(load_job(active_job),"error",e.what());}catch(...) {}}
+        if(!active_job.empty()) {
+            if(active_run&&string(e.what())!="Another operation is running for this job")
+                try {record_run_failure(load_job(active_job),e.what());}catch(const std::exception &error) {std::cerr<<"Health state error: "<<error.what()<<"\n";}
+            try {log_event(load_job(active_job),"error",e.what());}catch(...) {}
+        }
         return 1;
     }
     return 0;

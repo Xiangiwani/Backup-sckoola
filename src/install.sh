@@ -110,6 +110,20 @@ if [[ "$profile" == advanced ]]; then
     [[ -z "$answer" ]] || "$binary" config "$job" set cloud "$answer"
     read -r -p 'Maximum event log size in MB before rotation [5]: ' answer
     "$binary" config "$job" set log_max_mb "${answer:-5}"
+    for health_key in notifications desktop_notifications stale_hours notify_repeat_hours test_restore_days test_restore_max_mb storage_quota_mb offline_reminder_days; do
+        case "$health_key" in
+            notifications) health_default=true; health_prompt='Record and report failures/stale backups? true/false';;
+            desktop_notifications) health_default=false; health_prompt='Also display desktop notifications? true/false (requires a desktop session)';;
+            stale_hours) health_default=24; health_prompt='Hours without a successful run before warning (0 = off)';;
+            notify_repeat_hours) health_default=24; health_prompt='Repeat the same alert after N hours';;
+            test_restore_days) health_default=7; health_prompt='Test restore interval in days (0 = off; tested after successful runs)';;
+            test_restore_max_mb) health_default=64; health_prompt='Maximum sample file size for a test restore in MiB';;
+            storage_quota_mb) health_default=0; health_prompt='Local backup storage budget in MiB (0 = unlimited; chains stay protected)';;
+            offline_reminder_days) health_default=14; health_prompt='Offline-copy reminder interval in days (0 = off)';;
+        esac
+        read -r -p "$health_prompt [$health_default]: " answer
+        "$binary" config "$job" set "$health_key" "${answer:-$health_default}"
+    done
     read -r -p 'Start at login? true/false [true]: ' answer
     "$binary" config "$job" set autostart "${answer:-true}"
     read -r -p 'Back up after saved changes? true/false [false]: ' answer

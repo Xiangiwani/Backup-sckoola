@@ -271,13 +271,13 @@ inline bool schedule_active(const std::string &name,const std::string &h) {
 inline void schedule_remove(const std::string &name,const std::string &h) {
     auto dir=scheduler_dir(h); std::error_code ec;
 #ifdef _WIN32
-    for(auto suffix:{"","-startup"}) {auto task="CBackup-"+name+suffix;(void)exec({"schtasks.exe","/Delete","/TN",task,"/F"},true);fs::remove(dir/(task+".xml"),ec);}
+    for(auto suffix:{"","-startup","-health"}) {auto task="CBackup-"+name+suffix;(void)exec({"schtasks.exe","/Delete","/TN",task,"/F"},true);fs::remove(dir/(task+".xml"),ec);}
 #elif defined(__APPLE__)
-    for(auto suffix:{"",".startup"}) {auto label="org.cbackup."+name+suffix;(void)exec({"launchctl","bootout","gui/"+std::to_string(getuid())+"/"+label},true);fs::remove(dir/(label+".plist"),ec);}
+    for(auto suffix:{"",".startup",".health"}) {auto label="org.cbackup."+name+suffix;(void)exec({"launchctl","bootout","gui/"+std::to_string(getuid())+"/"+label},true);fs::remove(dir/(label+".plist"),ec);}
 #else
     auto base="cbackup-"+name;
-    (void)exec({"systemctl","--user","disable","--now",base+".timer",base+"-startup.service"},true);
-    for(auto suffix:{".timer",".service","-startup.service"})fs::remove(dir/(base+suffix),ec);
+    (void)exec({"systemctl","--user","disable","--now",base+".timer",base+"-startup.service",base+"-health.timer"},true);
+    for(auto suffix:{".timer",".service","-startup.service","-health.service","-health.timer"})fs::remove(dir/(base+suffix),ec);
     (void)exec({"systemctl","--user","daemon-reload"},true);
 #endif
 }
@@ -306,6 +306,7 @@ inline void schedule_install(const std::string &name,const std::string &schedule
     else { (void)exec({"schtasks.exe","/Delete","/TN","CBackup-"+name,"/F"},true);std::error_code ec;fs::remove(dir/("CBackup-"+name+".xml"),ec); }
     if(autostart)register_task("CBackup-"+name+"-startup","<LogonTrigger><Enabled>true</Enabled><UserId>"+sid+"</UserId></LogonTrigger>",watch?"watch":"run");
     else (void)exec({"schtasks.exe","/Delete","/TN","CBackup-"+name+"-startup","/F"},true);
+    register_task("CBackup-"+name+"-health","<TimeTrigger><Repetition><Interval>PT1H</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><StartBoundary>2020-01-01T00:00:00</StartBoundary><Enabled>true</Enabled></TimeTrigger>","health");
 #elif defined(__APPLE__)
     auto register_agent=[&](const std::string &label,const std::string &timing,const std::string &command,bool keepalive) {
         auto file=dir/(label+".plist");(void)exec({"launchctl","bootout","gui/"+std::to_string(getuid())+"/"+label},true);
@@ -318,6 +319,7 @@ inline void schedule_install(const std::string &name,const std::string &schedule
     else check(schedule.empty()||schedule=="startup","Unsupported schedule");
     if(autostart&&!watch)timing+="<key>RunAtLoad</key><true/>";
     register_agent("org.cbackup."+name,timing,"run",false);
+    register_agent("org.cbackup."+name+".health","<key>StartInterval</key><integer>3600</integer><key>RunAtLoad</key><true/>","health",false);
     if(watch&&autostart)register_agent("org.cbackup."+name+".startup","<key>RunAtLoad</key><true/>","watch",true);
     else {(void)exec({"launchctl","bootout","gui/"+std::to_string(getuid())+"/org.cbackup."+name+".startup"},true);std::error_code ec;fs::remove(dir/("org.cbackup."+name+".startup.plist"),ec);}
 #else
@@ -333,10 +335,13 @@ inline void schedule_install(const std::string &name,const std::string &schedule
     if(!timing.empty())write(dir/(base+".timer"),"[Unit]\nDescription=CBackup schedule "+name+"\n[Timer]\n"+timing+"Unit="+base+".service\n[Install]\nWantedBy=timers.target\n");
     if(autostart)write(dir/(base+"-startup.service"),"[Unit]\nDescription=CBackup startup "+name+"\n[Service]\nType="+(watch?std::string("simple"):std::string("oneshot"))+"\nNice=10\nIOSchedulingClass=idle\nExecStart="+quote(exe.u8string())+(watch?" watch ":" run ")+name+"\n"+(watch?"Restart=on-failure\nRestartSec=30\n":"")+"[Install]\nWantedBy=default.target\n");
     else {(void)exec({"systemctl","--user","disable","--now",base+"-startup.service"},true);std::error_code ec;fs::remove(dir/(base+"-startup.service"),ec);}
+    write(dir/(base+"-health.service"),"[Unit]\nDescription=CBackup health "+name+"\n[Service]\nType=oneshot\nNice=10\nExecStart="+quote(exe.u8string())+" health "+name+"\n");
+    write(dir/(base+"-health.timer"),"[Unit]\nDescription=CBackup hourly health "+name+"\n[Timer]\nOnCalendar=hourly\nPersistent=true\nUnit="+base+"-health.service\n[Install]\nWantedBy=timers.target\n");
     check(exec({"systemctl","--user","daemon-reload"})==0,"systemd user session unavailable");
     if(!timing.empty()) {check(exec({"systemctl","--user","enable","--now",base+".timer"})==0,"Cannot enable backup timer");check(exec({"systemctl","--user","restart",base+".timer"})==0,"Cannot restart backup timer");}
     else {(void)exec({"systemctl","--user","disable","--now",base+".timer"},true);std::error_code ec;fs::remove(dir/(base+".timer"),ec);}
     if(autostart)check(exec({"systemctl","--user","enable","--now",base+"-startup.service"})==0,"Cannot enable backup startup");
+    check(exec({"systemctl","--user","enable","--now",base+"-health.timer"})==0,"Cannot enable health timer");
 #endif
 }
 inline bool mounted_external(const fs::path &p) {

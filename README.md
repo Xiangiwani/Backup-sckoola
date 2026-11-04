@@ -1,4 +1,4 @@
-# CBackup 1.2
+# CBackup 1.3
 
 [Nederlandse snelstart en instelvoorbeelden](README.nl.md)
 
@@ -56,7 +56,7 @@ For manual backups, use `cbackup init personal /path/to/source --no-schedule`, o
 
 ## Advanced installation and later changes
 
-Choose **Advanced** in the installer to configure the job in one session. The advanced flow covers additional source files/folders, the destination, backup mode, compression and level, full-checkpoint frequency, retention days and minimum chain count, settings/installers/all profiles, dependency exclusions, extension/include/exclude filters, USB and cloud copies, login startup, polling after saved changes, polling interval, interval/daily/weekly/startup/manual planning, encryption and its secret environment-variable name, log size and terminal language. Optional lists and remote destinations can be left empty. The terminal explains the available settings before prompting.
+Choose **Advanced** in the installer to configure the job in one session. The advanced flow covers additional source files/folders, the destination, backup mode, compression and level, full-checkpoint frequency, retention days and minimum chain count, settings/installers/all profiles, dependency exclusions, extension/include/exclude filters, USB and cloud copies, login startup, polling after saved changes, polling interval, interval/daily/weekly/startup/manual planning, encryption and its secret environment-variable name, log size, health/alert settings, automatic sample restores, a storage budget, offline reminders and terminal language. Optional lists and remote destinations can be left empty. The terminal explains the available settings before prompting.
 
 You can select the installer flow explicitly:
 
@@ -288,6 +288,48 @@ cbackup cloud-pull personal
 
 USB replication checks that the destination is on mounted external storage rather than silently substituting an unmounted local folder. A missing drive/network can make replication fail after a local snapshot has already been saved; retry with `replicate`. rclone must be configured separately. Remote copies are not automatically pruned. `mirror` uses synchronization within the job's remote `mirror` directory and therefore mirrors deletions there too.
 
+## Health alerts, test restores, storage budgets and offline copies
+
+These four maintenance features are built into 1.3. All are configurable in Advanced installation and later with `config JOB set KEY VALUE`.
+
+| Setting | Default | Behavior |
+|---|---|---|
+| `notifications` | `true` | Failed runs, stale success, failed tests, quota violations and offline reminders are reported to stderr and a persistent alerts log |
+| `desktop_notifications` | `false` | Optional local desktop display; requires an available logged-in session |
+| `stale_hours` | `24` | Warn when no run has succeeded within this many hours; `0` disables the age check |
+| `notify_repeat_hours` | `24` | Suppress repeat alerts for the same unchanged condition until this interval passes |
+| `test_restore_days` | `7` | Test after a successful run when due, including an unchanged incremental run; `0` disables automatic testing |
+| `test_restore_max_mb` | `64` | Maximum size of the single rotating sample file, in MiB |
+| `storage_quota_mb` | `0` | Local committed archive/manifest/mirror budget in MiB; `0` is unlimited |
+| `offline_reminder_days` | `14` | Remind when a separate offline copy is due; `0` disables reminders |
+
+```sh
+cbackup health personal
+cbackup alerts personal
+cbackup config personal set stale_hours 48
+cbackup config personal set desktop_notifications true
+cbackup config personal set notify_repeat_hours 24
+cbackup test-restore personal
+cbackup config personal set test_restore_days 7
+cbackup config personal set test_restore_max_mb 64
+cbackup run personal --dry-run
+cbackup config personal set storage_quota_mb 20480
+cbackup config personal set offline_reminder_days 14
+cbackup offline-confirm personal SNAPSHOT_ID
+```
+
+`health` returns exit code `0` when healthy, `2` when attention is needed, and `1` on an operational/input error. A run counts as successful only after backup, configured replication and retention complete; unchanged runs count too. A failed automatic test also makes the run fail while preserving the saved snapshot. A later successful run clears the run failure; a successful test clears the test failure. Offline reminders remain until acknowledged. Turning `notifications` off suppresses alert delivery; `health` still reports the condition and its exit status.
+
+State and rotated alerts are saved under `~/.config/cbackup/state/JOB/`, separately from backup storage, so a failed destination remains diagnosable. `alerts` shows the current rotated-log segment; `alerts.log.1` retains the previous one. Identical conditions are throttled; a different error or recurrence after recovery can generate a new alert. Local desktop display uses Windows `msg.exe`, macOS `osascript`, or Linux `notify-send` (usually the `libnotify-bin`/libnotify package). Missing desktop facilities leave the persistent alert available. No email or network notification service is configured.
+
+Newly installed/enabled schedules include an independent hourly `health` task alongside the backup task, including daily/weekly backup schedules. Upgrade existing scheduled jobs with `cbackup schedule JOB on` to install it. `schedule JOB off` removes both. Checks need a functioning OS scheduler/user session; a powered-off machine cannot send a local notification. Manual jobs are checked with `health`, and a manual watcher refreshes an unchanged backup at least hourly while active.
+
+The test restore verifies the archive chain, rotates through files no larger than `test_restore_max_mb`, extracts one into a unique system-temporary directory, and verifies its recorded size and SHA-256. Temporary files are removed on success and failure. Empty snapshots receive a chain/extraction check. If every file exceeds the sample limit, the test reports failure rather than claiming coverage. One sample is not a full restore test. Encrypted chains require the password and enough temporary space to decrypt the largest required archive, which can exceed the sample size. Mirror has no archive history and is excluded from automatic sample restores.
+
+`run --dry-run` reports existing committed data and a conservative estimate for the proposed archive. Free space is checked before writing, with room for both temporary copies during encryption. The quota is checked against the exact completed archive plus its manifest before publishing it; compressed backups can fit even when the estimate is larger. Eligible expired chains may be replicated and pruned first, following the existing retention policy. The quota never overrides `keep_days` or removes a required incremental ancestor to force a backup to fit. If protected chains use the budget, the new archive is rejected and the old snapshots remain restorable. Increase the budget or explicitly adjust retention. Mirror replacement accounts for its old tree; its temporary new tree still needs free disk space. The budget excludes logs, health state, restore safety journals, remote copies and in-flight temporary files, so it is not a filesystem-wide disk limit.
+
+`offline-confirm JOB SNAPSHOT_ID` verifies the local chain and records **your confirmation** that you copied it to separate storage and disconnected that copy. It does not create or inspect an offline copy. USB replication alone is never treated as proof of an offline copy. Reminders become due after the configured interval from job creation or the last confirmation; the snapshot ID remains in the health state even if that snapshot later expires locally.
+
 ## Build and validation
 
 The build needs a C++17 compiler, CMake, libarchive and OpenSSL. The installers provide platform-specific dependency setup. For an already prepared toolchain:
@@ -296,11 +338,12 @@ The build needs a C++17 compiler, CMake, libarchive and OpenSSL. The installers 
 cmake -S src -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel 2
 python src/tests/integration.py /absolute/path/to/build/cbackup
+python src/tests/maintenance.py /absolute/path/to/build/cbackup
 ```
 
-On Windows the executable ends in `.exe`; multi-configuration generators may put it under `build/Release/`. Use a matching library architecture. The portable Python regression suite creates its own temporary HOME/USERPROFILE and uses `--no-schedule` so it never changes your real startup tasks. It covers backup chains, deletions, selections, dependency exclusions, IDs, encryption failures and undo. The included CI workflow is configured to build and run it on Linux, macOS and Windows; a passing CI run is still required to validate those platforms. The shell entrypoint `src/tests/integration.sh PATH_TO_CBACKUP` delegates to the same Python suite. `integration-1.1.sh` is preserved solely as a historical test for the old release and is not a 1.2 test.
+On Windows the executable ends in `.exe`; multi-configuration generators may put it under `build/Release/`. Use a matching library architecture. The portable Python regression suite creates its own temporary HOME/USERPROFILE and uses `--no-schedule` so it never changes your real startup tasks. It covers backup chains, deletions, selections, dependency exclusions, IDs, encryption failures and undo. The included CI workflow is configured to build and run it on Linux, macOS and Windows; a passing CI run is still required to validate those platforms. The shell entrypoint `src/tests/integration.sh PATH_TO_CBACKUP` delegates to the same Python suite. `integration-1.1.sh` is preserved solely as a historical test for the old release and is not a test for the current release.
 
-Validation in this editing session: the Windows x64 C++ source compiled successfully with GCC/UCRT64, and all **19 portable integration groups passed** against the native Windows executable. These cover Unicode filenames, full/incremental/differential/mirror modes, deleted files, partial recovery, dependency exclusions, undo and conflicts, authenticated encryption and tampering, retention, mixed compression formats and the polling watcher/lock. The installers passed Bash syntax and PowerShell parsing checks. The installers were not executed and no background tasks were registered on this computer. Native scheduling, cloud accounts and removable-drive replication still require a real platform test. No Linux, macOS or Raspberry Pi runtime results are claimed; their CI workflow is configured but has not been run in this session.
+Validation in this editing session: the Windows x64 C++ source compiled successfully with GCC/UCRT64, and **25 integration groups passed (19 general + 6 maintenance)** against the native Windows executable during development. The final build, which also adds the mirror dry-run space estimate, compiled successfully; its final runtime rerun was blocked by Windows Application Control (WinError 4551), including outside the sandbox. That last rerun is therefore unverified. These cover Unicode filenames, full/incremental/differential/mirror modes, deleted files, partial recovery, dependency exclusions, undo and conflicts, authenticated encryption and tampering, retention, mixed compression formats and the polling watcher/lock. Maintenance checks additionally cover notification throttling, stale-success detection, independent failure state for unavailable destinations, offline confirmation/reminders, automatic sample rotation and cleanup, corrupt archives, sample limits, and exact quotas preserving older restores. The installers passed Bash syntax and PowerShell parsing checks. The installers were not executed and no background tasks were registered on this computer. Native scheduling, cloud accounts and removable-drive replication still require a real platform test. No Linux, macOS or Raspberry Pi runtime results are claimed; their CI workflow is configured but has not been run in this session.
 
 Platform-specific startup behavior, removable drives and cloud accounts need validation on the intended computer. A successful local build does not prove all operating-system/architecture combinations have been tested. Raspberry Pi uses the Linux source build; there is no single universal binary.
 
@@ -313,18 +356,3 @@ Platform-specific startup behavior, removable drives and cloud accounts need val
 - SHA-256 detects corruption relative to the manifest; plaintext manifests are not signed. Keep a second protected or offline copy.
 - An automatic task runs with the user's rights and depends on the computer/storage being available. No backup-at-shutdown guarantee is made.
 - Regularly restore a sample to a new directory and compare it with the expected data. Keep your encryption secret and recovery instructions outside the machine being protected.
-
-## Suggested next features — not implemented
-
-These are possible follow-up improvements, not features included in this release:
-
-- Failure notifications: report a failed run or a job that has not succeeded recently.
-- Automatic test restores: periodically recover a sample into temporary storage and verify it.
-- Storage quotas: estimate required space and apply a configurable storage budget without breaking restore chains.
-- Offline-copy reminders: remind the user when a separate offline backup copy is due.
-
-
-
-
-
-

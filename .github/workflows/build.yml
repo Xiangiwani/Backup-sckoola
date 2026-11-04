@@ -26,7 +26,9 @@ jobs:
       - name: Build
         run: cmake --build build --parallel 2
       - name: Portable regression tests
-        run: python3 src/tests/integration.py build/cbackup
+        run: |
+          python3 src/tests/integration.py build/cbackup
+          python3 src/tests/maintenance.py build/cbackup
 
   windows:
     runs-on: windows-latest
@@ -51,4 +53,6 @@ jobs:
       - name: Build
         run: cmake --build build --parallel 2
       - name: Portable regression tests
-        run: python src/tests/integration.py build/cbackup.exe
+        run: |
+          python src/tests/integration.py build/cbackup.exe
+          python src/tests/maintenance.py build/cbackup.exe

@@ -369,6 +369,17 @@ inline void settings(std::ostream &out) {
     line("encryption = none|aes-256-gcm; password_env = CBACKUP_PASSWORD",c.encryption);
     line("profile = all|settings|installers",c.profile);
     line("log_max_mb = 5; log / ids / changes",c.logging);
+    const bool nl=language()=="nl";
+    line("notifications = true; desktop_notifications = false; notify_repeat_hours = 24",
+         nl?"Meldingen in stderr en alerts; optioneel op het bureaublad. Herhalingen worden begrensd.":"Alerts to stderr and the local alerts log; optional desktop display. Repeated conditions are throttled.");
+    line("stale_hours = 24; health / alerts",
+         nl?"Waarschuw wanneer een succesvolle run te lang uitblijft; 0 schakelt de ouderdomscontrole uit.":"Report failed runs or no recent successful run; 0 disables the stale threshold. Scheduled jobs get an hourly health check.");
+    line("test_restore_days = 7; test_restore_max_mb = 64; test-restore",
+         nl?"Periodiek een roterend voorbeeldbestand tijdelijk herstellen en hashen; 0 dagen schakelt automatisch testen uit.":"Periodically restore a rotating sample into temporary storage and verify SHA-256; 0 days disables automatic tests. The limit is per sample file.");
+    line("storage_quota_mb = 0",
+         nl?"Budget in MiB voor archieven, manifests en mirror; 0 = onbeperkt. Overschrijding stopt de nieuwe back-up; vereiste ketens blijven behouden.":"Committed archives, manifests and mirror budget in MiB; 0 = unlimited. Estimates are advisory; compressed size is checked exactly. Required chains remain protected.");
+    line("offline_reminder_days = 14; offline-confirm JOB SNAPSHOT_ID",
+         nl?"Herinner aan een losse offline kopie; bevestig zelf na kopieren en loskoppelen. 0 = uit.":"Remind when a separate offline copy is due; acknowledge manually after copying and disconnecting. 0 disables reminders.");
     line("restore / --to / --original / --only / undo / verify / --dry-run",c.restore);
     out<<"language: cbackup language CODE | cbackup --lang CODE help\n";
 }
@@ -397,6 +408,10 @@ inline void help(std::ostream &out,const std::string &version) {
   cbackup changes JOB ID [ID]
   cbackup log JOB [--tail N]
   cbackup verify JOB ID
+  cbackup health JOB
+  cbackup alerts JOB
+  cbackup test-restore JOB
+  cbackup offline-confirm JOB SNAPSHOT_ID
   cbackup restore JOB ID --to NEW_FOLDER [--only FILE_OR_FOLDER] [--dry-run]
   cbackup restore JOB ID --original [--only FILE_OR_FOLDER] [--yes] [--dry-run]
   cbackup undo-list JOB
