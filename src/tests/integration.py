@@ -1,8 +1,4 @@
-#!/usr/bin/env python3
-"""Portable black-box regression tests. Never uses the real user profile/scheduler.
 
-Usage: python src/tests/integration.py PATH_TO_CBACKUP
-"""
 from __future__ import annotations
 
 import json
