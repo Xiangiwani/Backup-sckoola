@@ -1,4 +1,4 @@
-# CBackup 1.3
+# CBackup
 
 [Nederlandse snelstart en instelvoorbeelden](README.nl.md)
 
