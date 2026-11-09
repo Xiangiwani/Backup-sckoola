@@ -1,4 +1,4 @@
-# CBackup 1.3 — Nederlandse snelstart
+# CBackup
 
 CBackup maakt back-ups van bestanden en mappen. Je kunt een volledige, incrementele, differentiële of spiegelback-up kiezen. Terugzetten werkt met een snapshot-ID en kan voor alles, één bestand of een map. Voor een herstel op de oorspronkelijke plek krijg je ook een ID waarmee je dat herstel weer ongedaan kunt maken.
 
